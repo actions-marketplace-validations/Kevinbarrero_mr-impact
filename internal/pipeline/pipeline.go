@@ -19,6 +19,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/mod/modfile"
+
 	"github.com/Kevinbarrero/mr-impact/internal/arch"
 	"github.com/Kevinbarrero/mr-impact/internal/callgraph"
 	"github.com/Kevinbarrero/mr-impact/internal/config"
@@ -110,7 +112,7 @@ func run(ctx context.Context, cfg Config) (report.Model, error) {
 	case !errors.Is(err, diff.ErrNoMergeBase):
 		return report.Model{}, err
 	}
-	m := report.Model{BaseSHA: baseSHA, Coverage: "static", Config: configNote(ctx, cfg, baseSHA)}
+	m := report.Model{BaseSHA: baseSHA, Coverage: "static", Config: configNote(ctx, cfg, baseSHA), Workspace: workspaceNote(ctx, cfg.Dir)}
 
 	// 2. Diff.
 	changes, err := diff.Run(ctx, cfg.Dir, baseSHA, head)
@@ -263,7 +265,11 @@ func run(ctx context.Context, cfg Config) (report.Model, error) {
 	var rated []ratedFunc
 	for _, f := range live {
 		if !prog.Files[f.File] {
-			m.NotAnalyzed = append(m.NotAnalyzed, f.Display+" (build tags)")
+			reason := "build tags"
+			if mod, ok := otherModule(cfg.Dir, f.File); ok {
+				reason = "in another module: " + mod
+			}
+			m.NotAnalyzed = append(m.NotAnalyzed, f.Display+" ("+reason+")")
 			continue
 		}
 		var im callgraph.Impact
@@ -279,7 +285,7 @@ func run(ctx context.Context, cfg Config) (report.Model, error) {
 			Kind: f.Kind, Exported: f.Exported,
 			NonTestCallers: len(im.Callers), TestReached: im.TestReached,
 			Importable:      importable(pkgPathOf(prog.ModulePath, f.File), pkgName),
-			BranchesRemoved: f.BranchesRemoved,
+			BranchesRemoved: branchRuleApplies(f),
 			AddedLines:      len(f.AddedLines),
 			ReachUnknown:    graph == nil,
 		}
@@ -316,7 +322,7 @@ func run(ctx context.Context, cfg Config) (report.Model, error) {
 		}
 		apis = touchedAPIs(sites, f.AddedLines, critical)
 		in.Sensitive = len(apis) > 0 || critical != ""
-		cover := coverText(prof != nil, in.Covered, in.Total, graph != nil, im.TestReached, cross, prog.ModulePath)
+		cover := coverText(prof != nil, in.Covered, in.Total, len(f.AddedLines), graph != nil, im.TestReached, cross, prog.ModulePath)
 		var entries []callgraph.Entry
 		if graph != nil {
 			entries = graph.EntryPoints(f.File, f.StartLine, entryRoot(prog))
@@ -327,7 +333,8 @@ func run(ctx context.Context, cfg Config) (report.Model, error) {
 				callers1 = append(callers1, c.Display+"\x00"+c.Pkg)
 			}
 		}
-		level := risk.Assess(in)
+		r := risk.Rate(in)
+		level := r.Level
 		if in.Sensitive {
 			// Its own row, also when folded into a group later.
 			m.Sensitive = append(m.Sensitive, report.SensitiveRow{
@@ -337,7 +344,7 @@ func run(ctx context.Context, cfg Config) (report.Model, error) {
 		}
 		rated = append(rated, ratedFunc{
 			Row: report.FuncRow{
-				Level: level, Display: f.Display, Kind: kindText(f, in.Sensitive),
+				Level: level, Reason: r.Reason, Display: f.Display, Kind: kindText(f, in.Sensitive),
 				Callers: im.Callers, CoverText: cover, Registered: im.Registered, Entries: entries, File: f.File, Uncovered: uncovered,
 			},
 			Key: f.Display + "\x00" + pkgPath, New: f.Kind == symbols.New, In: in,
@@ -672,7 +679,7 @@ func kindText(f symbols.ChangedFunc, isSensitive bool) string {
 		k = "signature (exported)"
 	}
 	if f.BranchesRemoved {
-		k += " (branch removed)"
+		k += branchText(f)
 	}
 	if f.Wiring {
 		k += " · wiring"
@@ -681,6 +688,35 @@ func kindText(f symbols.ChangedFunc, isSensitive bool) string {
 		k += " · sensitive"
 	}
 	return k
+}
+
+// branchRuleApplies reports whether the "branch removed" rating rule
+// applies: a branch was removed and not every removed branch moved.
+func branchRuleApplies(f symbols.ChangedFunc) bool {
+	return f.BranchesRemoved && f.MovedBranches < f.RemovedBranches
+}
+
+// branchText renders the branch-removed suffix: moved branches name where
+// they went (at most two destinations, then " +N").
+func branchText(f symbols.ChangedFunc) string {
+	if f.MovedBranches == 0 || len(f.MovedTo) == 0 {
+		return " (branch removed)"
+	}
+	var names []string
+	for i, d := range f.MovedTo {
+		if i == 2 {
+			break
+		}
+		names = append(names, "`"+d+"`")
+	}
+	to := strings.Join(names, ", ")
+	if extra := len(f.MovedTo) - 2; extra > 0 {
+		to += fmt.Sprintf(" +%d", extra)
+	}
+	if f.MovedBranches >= f.RemovedBranches {
+		return " (branch moved to " + to + ")"
+	}
+	return fmt.Sprintf(" (branch removed · %d of %d moved to %s)", f.MovedBranches, f.RemovedBranches, to)
 }
 
 func containsAny(files []string, set map[string]bool) bool {
@@ -765,4 +801,21 @@ func touchedAPIs(sites []sensitive.Site, added []int, critical string) []string 
 		}
 	}
 	return out
+}
+
+// otherModule reports the module path of the nearest go.mod above rel (a
+// slash path relative to root) that lies below root: the file belongs to a
+// module other than the analysed one, which is never loaded.
+func otherModule(root, rel string) (string, bool) {
+	for d := path.Dir(rel); d != "." && d != "/" && d != ""; d = path.Dir(d) {
+		b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(d), "go.mod"))
+		if err != nil {
+			continue
+		}
+		if p := modfile.ModulePath(b); p != "" {
+			return p, true
+		}
+		return filepath.ToSlash(d), true
+	}
+	return "", false
 }

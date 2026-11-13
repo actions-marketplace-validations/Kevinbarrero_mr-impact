@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/types"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -514,5 +515,140 @@ func TestSite_SpreadKeepsEllipsis(t *testing.T) {
 	got = registeredAt(t, "s3")
 	if len(got) != 1 || got[0].Call != "Use([]func(){…}...)" {
 		t.Errorf("Registered = %+v, want Use([]func(){…}...) (ExprString elides literals)", got)
+	}
+}
+
+const lcDir = "testdata/libcalled"
+
+var (
+	lcOnce  sync.Once
+	lcGraph *Graph
+	lcErr   error
+)
+
+// loadLibCalled loads and builds the libcalled fixture once.
+func loadLibCalled(t *testing.T) *Graph {
+	t.Helper()
+	lcOnce.Do(func() {
+		var p *load.Program
+		p, lcErr = load.Load(context.Background(), lcDir, nil)
+		if lcErr == nil {
+			lcGraph, lcErr = Build(context.Background(), p)
+		}
+	})
+	if lcErr != nil {
+		t.Fatal(lcErr)
+	}
+	return lcGraph
+}
+
+func lcImpact(t *testing.T, file, decl string) Impact {
+	t.Helper()
+	im := loadLibCalled(t).Impact(file, lineOf(t, lcDir, file, decl), 2)
+	if !im.Found {
+		t.Fatalf("%s not found", decl)
+	}
+	return im
+}
+
+// errors.Is calls Unwrap inside the standard library, where VTA sees no
+// body: the test that converts candidateErrors to error reaches it, but is
+// not a caller.
+func TestLibCalled_UnwrapViaErrorsIs(t *testing.T) {
+	im := lcImpact(t, "errs.go", "func (candidateErrors) Unwrap")
+	if !im.TestReached || len(im.Callers) != 0 {
+		t.Errorf("TestReached=%v Callers=%+v, want true, none", im.TestReached, im.Callers)
+	}
+	if want := []string{"example.com/lc"}; !reflect.DeepEqual(im.TestPkgs, want) {
+		t.Errorf("TestPkgs = %v, want %v", im.TestPkgs, want)
+	}
+}
+
+func TestLibCalled_WrongSignature(t *testing.T) {
+	if im := lcImpact(t, "str.go", "func (bad) Unwrap"); im.TestReached {
+		t.Errorf("bad.Unwrap (func() string) test-reached: %+v", im)
+	}
+}
+
+func TestLibCalled_Generic(t *testing.T) {
+	if im := lcImpact(t, "gen.go", "func (E[T]) Unwrap"); !im.TestReached {
+		t.Errorf("E.Unwrap not test-reached through E[int]: %+v", im)
+	}
+}
+
+func TestLibCalled_ValueConversionNoPointerMethods(t *testing.T) {
+	if im := lcImpact(t, "ptr.go", "func (*P) String"); im.TestReached {
+		t.Errorf("(*P).String test-reached though only P{} is converted: %+v", im)
+	}
+}
+
+// fmt.Println(v) converts v to any: S.String is reached.
+func TestLibCalled_Println(t *testing.T) {
+	if im := lcImpact(t, "more.go", "func (S) String"); !im.TestReached {
+		t.Errorf("S.String not test-reached through fmt.Println(v): %+v", im)
+	}
+}
+
+// Converting *Q reaches the pointer-receiver method.
+func TestLibCalled_PointerConversion(t *testing.T) {
+	if im := lcImpact(t, "more.go", "func (*Q) String"); !im.TestReached {
+		t.Errorf("(*Q).String not test-reached though &Q{} is converted: %+v", im)
+	}
+}
+
+// A conversion inside a closure of a test counts as the test's own.
+func TestLibCalled_ClosureConversion(t *testing.T) {
+	if im := lcImpact(t, "more.go", "func (C) Error"); !im.TestReached {
+		t.Errorf("C.Error not test-reached through a test's closure: %+v", im)
+	}
+}
+
+func TestLibCalled_EntryPoints(t *testing.T) {
+	g := loadLibCalled(t)
+	got := g.EntryPoints("h.go", lineOf(t, lcDir, "h.go", "func (H) ServeHTTP"), apiPred)
+	want := Entry{"main", "main.main"}
+	found := false
+	for _, e := range got {
+		found = found || e == want
+	}
+	if !found {
+		t.Errorf("EntryPoints = %v, want it to hold %v", got, want)
+	}
+}
+
+func TestLibCalled_NotACaller(t *testing.T) {
+	im := lcImpact(t, "errs.go", "func (candidateErrors) Error")
+	if len(im.Callers) != 0 || im.TestCallers != 0 {
+		t.Errorf("Callers=%+v TestCallers=%d, want none, 0", im.Callers, im.TestCallers)
+	}
+	if !im.TestReached {
+		t.Errorf("candidateErrors.Error not test-reached: %+v", im)
+	}
+}
+
+func TestLibraryCalledList(t *testing.T) {
+	if len(libCalledList) != 22 {
+		t.Errorf("list has %d entries, want 22", len(libCalledList))
+	}
+	sig := types.NewSignatureType(nil, nil, nil, nil, types.NewTuple(types.NewParam(0, nil, "", types.Typ[types.String])), false)
+	if !libraryCalled(types.NewFunc(0, nil, "Error", sig)) {
+		t.Error("Error() string not library-called")
+	}
+	if libraryCalled(types.NewFunc(0, nil, "Unwrap", sig)) {
+		t.Error("Unwrap() string library-called")
+	}
+	// Parameter and result names are not part of the signature.
+	errT := types.Universe.Lookup("error").Type()
+	bytesT := types.NewSlice(types.Typ[types.Byte]) // prints []uint8: identical to []byte
+	is := types.NewSignatureType(nil, nil, nil,
+		types.NewTuple(types.NewParam(0, nil, "target", errT)),
+		types.NewTuple(types.NewParam(0, nil, "", types.Typ[types.Bool])), false)
+	if !libraryCalled(types.NewFunc(0, nil, "Is", is)) {
+		t.Error("Is(target error) bool not library-called")
+	}
+	mj := types.NewSignatureType(nil, nil, nil, nil,
+		types.NewTuple(types.NewParam(0, nil, "b", bytesT), types.NewParam(0, nil, "err", errT)), false)
+	if !libraryCalled(types.NewFunc(0, nil, "MarshalJSON", mj)) {
+		t.Error("MarshalJSON() (b []byte, err error) not library-called")
 	}
 }

@@ -4,6 +4,26 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [v0.4.0] - 2026-11-12
+
+### Added
+
+- **Look at first:** a `👉 **Look at first:** …` line names up to three rows, riskiest first, each with why (`untested, 3 callers`, `added lines not measured`), then `+N` for the rest, so a reviewer starts in the right place.
+- **Compact layout:** above 20 rows the table shows every 🔴 row and the first 10 🟡 rows (rows rated by `added lines not measured` taken last, here and in Look at first), and all other rows go in a second table under `<details>`; the 50-row cap covers both tables together and no row appears twice.
+- **`📦 go.work` line:** when the head is built in a Go workspace, the note states the `go.work` in effect, the other modules it uses (and whether the analysed module requires or replaces them), and that the base was built from `go.mod`. A `go.work` that uses only the analysed module reads ``📦 go.work: `go.work` (no other modules)``; a `--dir` reached through a symlink no longer lists itself as another module.
+- **Moved branches:** a removed branch whose exact text is added in another function now names it: ``body (branch moved to `pkg.F`)`` when every removed branch moved, ``(branch removed · 1 of 3 moved to `pkg.F`)`` when some did. A function whose removed branches all moved is no longer held by the branch-removed rule. A destination counts when the branch starts on an added line or lies in a function new in this MR. A generic branch (`return nil`, `return err`, `if err != nil`, `default`, …) moves only to a function the changed function's head body calls or uses as a value; each added copy accounts for one removed branch across all functions, taken in name order.
+
+### Changed
+
+- **Static mode (no coverprofile):** a function with added lines that a test reaches is 🟡, not 🟢, because whether the added lines ran is not measured; its cover cell reads `reached by test · added lines not measured`. A function with no added lines that a test reaches reads `no added lines · reached by test` and stays 🟢. A degraded run without a call graph is unchanged (`n/a`). When such a function also lost a branch, its reason is `branch removed`, so Look at first does not rank it with the unmeasured rows.
+- **Legend:** the footer rules now say 🟡 includes "added lines not measured" and 🟢 is "covered, or no added lines and reached by a test".
+
+### Fixed
+
+- A changed function in another module of a `go.work` workspace reads `Not analyzed: … (in another module: <path>)`, not `(build tags)`.
+- Methods the standard library calls on interface values (`Error`, `Unwrap` through `errors.Is`/`errors.As`, `String`, `ServeHTTP`, …) count as reached by a test that converts their type to an interface; before, they read `not reached` and no callers. These edges never count as callers.
+- The base revision is loaded with `GOWORK=off`, from its own `go.mod`, so a `go.work` that exists only at the head (or names modules the base lacks) no longer fails the base load.
+
 ## [v0.3.2] - 2026-11-11
 
 ### Added

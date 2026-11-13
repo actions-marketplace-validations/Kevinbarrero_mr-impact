@@ -23,6 +23,9 @@ const Marker = "<!-- mrimpact:v1 -->"
 const (
 	maxTableRows   = 50
 	maxDiagramNode = 20
+	compactAbove   = 20 // table rows above which the layout is compact
+	compactYellow  = 10 // yellow rows the compact layout keeps visible
+	lookFirstN     = 3  // rows named by the "Look at first" line
 	maxCallerList  = 10
 	maxUnusedList  = 15
 	maxInlineList  = 5 // longer lists are counted and collapsed
@@ -35,10 +38,11 @@ const (
 // FuncRow is one changed function.
 type FuncRow struct {
 	Level      risk.Level
+	Reason     string // the rule that set Level ("untested, 3 callers"); empty for 🟢
 	Display    string
 	Kind       string // "new" | "body" | "signature" | "signature (exported)"
 	Callers    []callgraph.Caller
-	CoverText  string            // "0 % (0/12)", "no added lines · reached by test", "reached by test", "not reached", "n/a"
+	CoverText  string            // "100 % (5/5)", "0 % (0/12)", "reached by test · added lines not measured", "no added lines · reached by test", "not reached", "n/a"
 	Registered []callgraph.Site  // where the function is passed as a value (handler/callback registration)
 	Entries    []callgraph.Entry // entry points reaching it (main/init/api/registration); nil in a degraded run
 	File       string            // repo-relative; shown only in a group's members list
@@ -93,11 +97,27 @@ type ConfigNote struct {
 	Changes                 []config.Change
 }
 
+// WorkspaceNote is the go.work the head was loaded with.
+type WorkspaceNote struct {
+	Path       string // the go.work path, relative to --dir when below or beside it
+	Unreadable bool
+	Modules    []WorkspaceModule // sorted by Path; the analysed module excluded
+}
+
+// WorkspaceModule is one other module of the workspace.
+type WorkspaceModule struct {
+	Path     string // module path
+	Dir      string // relative to --dir, slash-separated, cleaned ("../go-patterns")
+	Required string // version go.mod requires; "" = not required
+	Replace  string // go.mod replace target for Path; "" = none
+}
+
 // Model is everything the note shows.
 type Model struct {
 	Funcs        []FuncRow          // unsorted; Render sorts by Level desc, len(Callers) desc, Display
 	Sensitive    []SensitiveRow     // unsorted; Render lists untested first, then by Display
 	Config       *ConfigNote        // nil: nothing to say about the config file
+	Workspace    *WorkspaceNote     // nil: no go.work in effect
 	Arch         *arch.Result       // nil: no architecture analysis (e.g. an early failure)
 	RemovedCases []RemovedCase      // behaviour changes: first in the note
 	Unused       []callgraph.Unused // functions this MR left without callers
@@ -175,7 +195,9 @@ func Render(m Model) string {
 		fmt.Fprintf(&b, "\\\n+%d new functions folded into %d %s", m.Folded, m.Groups, groups)
 	}
 	b.WriteString("\n\n")
+	writeLookFirst(&b, funcs)
 	writeConfigNote(&b, m.Config)
+	writeWorkspaceNote(&b, m.Workspace)
 
 	if m.CrossPkgOnly > 0 {
 		fmt.Fprintf(&b, "ℹ️ %d functions are covered only by tests in other packages; if the coverprofile was made without -coverpkg it counts same-package tests only. Run `go test -coverpkg=./... -coverprofile=…` for line coverage.\n\n", m.CrossPkgOnly)
@@ -193,10 +215,20 @@ func Render(m Model) string {
 
 	// With no rated functions there is nothing for the table, diagram or
 	// caller list to show; only the context lines and limits remain.
+	// shown: the rows the table, uncovered lines, diagram and caller list
+	// cover. Compact layout: only the visible ones.
+	shown := funcs
 	if len(funcs) > 0 {
-		writeTable(&b, funcs)
+		if len(funcs) > compactAbove {
+			var hidden []FuncRow
+			shown, hidden = splitCompact(funcs)
+			writeCompactTable(&b, funcs, shown, hidden)
+		} else {
+			writeTable(&b, funcs)
+			shown = funcs[:min(maxTableRows, len(funcs))]
+		}
 		if m.Coverage == "coverprofile" {
-			writeUncovered(&b, funcs[:min(maxTableRows, len(funcs))])
+			writeUncovered(&b, shown)
 		}
 	}
 
@@ -212,14 +244,21 @@ func Render(m Model) string {
 	}
 
 	if len(funcs) > 0 {
-		writeDiagram(&b, funcs)
-		writeCallers(&b, funcs)
+		if len(funcs) > compactAbove {
+			if len(shown) > 0 {
+				writeDiagram(&b, shown)
+				writeCallers(&b, shown)
+			}
+		} else {
+			writeDiagram(&b, funcs)
+			writeCallers(&b, funcs)
+		}
 	}
 
 	b.WriteString("<details><summary>⚠️ Limits of this analysis</summary>\n\n")
 	b.WriteString("- Calls via `reflect` or dynamic registration (e.g. handlers by name) are not detected.\n")
 	b.WriteString("- This repo only: callers in other services (HTTP/gRPC) are not visible.\n")
-	b.WriteString("- Functions called only from dependencies (e.g. HTTP handlers registered with net/http) or from package-level initializers show no callers; where such a function is registered is listed under Registered.\n")
+	b.WriteString("- Functions called only from dependencies (e.g. HTTP handlers registered with net/http) or from package-level initializers show no callers (methods the standard library calls on interface values, such as `Error`, `Unwrap` or `ServeHTTP`, count as reached from the code that converts their type to an interface; see the list in the reference); where such a function is registered is listed under Registered.\n")
 	b.WriteString("- Now unused: uses through `reflect`, `//go:linkname` or other repositories are not seen; exported methods, and exported functions of packages other modules can import, are never listed.\n")
 	for _, s := range m.NotAnalyzed {
 		b.WriteString("- Not analyzed: " + s + "\n")
@@ -272,6 +311,44 @@ func writeConfigNote(b *strings.Builder, c *ConfigNote) {
 	b.WriteString("\n\n")
 }
 
+// maxWorkspaceModules caps the modules the 📦 line names.
+const maxWorkspaceModules = 5
+
+// writeWorkspaceNote writes the one go.work line: the other workspace modules
+// the head was built against, and that the base is built from go.mod.
+func writeWorkspaceNote(b *strings.Builder, w *WorkspaceNote) {
+	if w == nil {
+		return
+	}
+	if w.Unreadable {
+		b.WriteString("📦 go.work: " + w.Path + " (unreadable)\n\n")
+		return
+	}
+	if len(w.Modules) == 0 { // go.work uses only the analysed module
+		b.WriteString("📦 go.work: `" + w.Path + "` (no other modules) — base built from go.mod\n\n")
+		return
+	}
+	var parts []string
+	for i, m := range w.Modules {
+		if i == maxWorkspaceModules {
+			break
+		}
+		state := "not required"
+		switch {
+		case m.Replace != "":
+			state = "go.mod replaces → " + m.Replace
+		case m.Required != "":
+			state = "go.mod requires " + m.Required
+		}
+		parts = append(parts, "`"+m.Path+"` from `"+m.Dir+"` ("+state+")")
+	}
+	b.WriteString("📦 go.work: " + strings.Join(parts, " · "))
+	if n := len(w.Modules) - maxWorkspaceModules; n > 0 {
+		fmt.Fprintf(b, " +%d", n)
+	}
+	b.WriteString(" — base built from go.mod\n\n")
+}
+
 // codeJoin renders items as comma-separated code spans.
 func codeJoin(items []string) string {
 	out := make([]string, len(items))
@@ -291,12 +368,26 @@ func codeSpan(s string) string {
 }
 
 func writeTable(b *strings.Builder, funcs []FuncRow) {
+	cut := funcs[:min(maxTableRows, len(funcs))]
+	writeRows(b, cut, nil, true)
+	if len(funcs) > maxTableRows {
+		fmt.Fprintf(b, "\n_… and %d more_\n", len(funcs)-maxTableRows)
+	}
+	b.WriteString("\n")
+	writeMembers(b, cut)
+}
+
+// writeRows writes one table of rows: the columns the rows need, the "All
+// changes shown are reached from" line when stated is set, and the rows. The
+// common entry points are computed over rows unless given (the collapsed
+// table omits the visible table's); it returns the ones used.
+func writeRows(b *strings.Builder, rows []FuncRow, given []string, stated bool) []string {
 	withReg, withEntries := false, false
-	for i, f := range funcs {
-		if i < maxTableRows && len(f.Registered) > 0 {
+	for _, f := range rows {
+		if len(f.Registered) > 0 {
 			withReg = true
 		}
-		if i < maxTableRows && len(f.Entries) > 0 {
+		if len(f.Entries) > 0 {
 			withEntries = true
 		}
 	}
@@ -307,18 +398,15 @@ func writeTable(b *strings.Builder, funcs []FuncRow) {
 	if withEntries {
 		head, sep = head+" Entry points |", sep+"---|"
 	}
-	var common []string
-	if withEntries {
-		common = commonEntries(funcs[:min(maxTableRows, len(funcs))])
+	common := given
+	if stated && withEntries {
+		common = commonEntries(rows)
 	}
-	if len(common) > 0 {
+	if stated && len(common) > 0 {
 		b.WriteString("All changes shown are reached from: " + strings.Join(common, ", ") + "\n\n")
 	}
 	b.WriteString(head + " Added-line coverage |\n" + sep + "---|\n")
-	for i, f := range funcs {
-		if i == maxTableRows {
-			break
-		}
+	for _, f := range rows {
 		fmt.Fprintf(b, "| %s | `%s` | %s | %s | ", f.Level.Emoji(), cell(f.Display), cell(f.Kind), callerCell(f.Callers))
 		if withReg {
 			b.WriteString(registeredCell(f.Registered) + " | ")
@@ -328,11 +416,148 @@ func writeTable(b *strings.Builder, funcs []FuncRow) {
 		}
 		fmt.Fprintf(b, "%s |\n", cell(f.CoverText))
 	}
+	return common
+}
+
+// reasonUnmeasured is the reason of the "added lines not measured" rule. In
+// a static run it can rate most rows 🟡, so within a level its rows rank
+// after every other reason when the compact layout picks the visible 🟡
+// rows and when Look at first picks its rows; the table keeps its order.
+const reasonUnmeasured = "added lines not measured"
+
+// demoteUnmeasured returns rows reordered so that, within each run of
+// rows of one level, the reasonUnmeasured rows follow the others; each
+// part keeps its order.
+func demoteUnmeasured(rows []FuncRow) []FuncRow {
+	out := make([]FuncRow, 0, len(rows))
+	for i := 0; i < len(rows); {
+		j := i
+		for j < len(rows) && rows[j].Level == rows[i].Level {
+			j++
+		}
+		var later []FuncRow
+		for _, f := range rows[i:j] {
+			if f.Reason == reasonUnmeasured {
+				later = append(later, f)
+			} else {
+				out = append(out, f)
+			}
+		}
+		out = append(out, later...)
+		i = j
+	}
+	return out
+}
+
+// splitCompact splits the table's rows (the first maxTableRows of funcs, in
+// order) for the compact layout: visible is every red row and compactYellow
+// yellow ones (the first in table order, reasonUnmeasured rows last); hidden
+// is the rest. Both keep table order.
+func splitCompact(funcs []FuncRow) (visible, hidden []FuncRow) {
+	table := funcs[:min(maxTableRows, len(funcs))]
+	shown := map[int]bool{}
+	for _, unmeasured := range []bool{false, true} {
+		for i, f := range table {
+			if len(shown) == compactYellow {
+				break
+			}
+			if f.Level == risk.Yellow && (f.Reason == reasonUnmeasured) == unmeasured {
+				shown[i] = true
+			}
+		}
+	}
+	for i, f := range table {
+		if f.Level == risk.Red || shown[i] {
+			visible = append(visible, f)
+		} else {
+			hidden = append(hidden, f)
+		}
+	}
+	return visible, hidden
+}
+
+// writeCompactTable writes the visible table, then the collapsed one with the
+// rest. The summary counts every row not visible, including those past the
+// row cap; the overflow line for those sits inside the collapsed block.
+func writeCompactTable(b *strings.Builder, funcs, visible, hidden []FuncRow) {
+	var common []string
+	if len(visible) > 0 { // all green: nothing to show above the fold
+		common = writeRows(b, visible, nil, true)
+		b.WriteString("\n")
+		writeMembers(b, visible)
+	}
+
+	var yellow, green int
+	for _, f := range funcs {
+		if f.Level == risk.Green {
+			green++
+		} else if f.Level == risk.Yellow {
+			yellow++
+		}
+	}
+	for _, f := range visible {
+		if f.Level == risk.Yellow {
+			yellow--
+		}
+	}
+	var parts []string
+	if yellow > 0 {
+		parts = append(parts, fmt.Sprintf("🟡 %d", yellow))
+	}
+	if green > 0 {
+		parts = append(parts, fmt.Sprintf("🟢 %d", green))
+	}
+	// A red row past the cap is hidden too: it counts, in its own part.
+	if red := len(funcs) - len(visible) - yellow - green; red > 0 {
+		parts = append([]string{fmt.Sprintf("🔴 %d", red)}, parts...)
+	}
+	if len(funcs) == len(visible) { // nothing hidden: no collapsed block
+		return
+	}
+	more := "more "
+	if len(visible) == 0 { // nothing above the fold: the block is the whole table
+		more = ""
+	}
+	fmt.Fprintf(b, "<details><summary>%d %schanged functions (%s)</summary>\n\n", len(funcs)-len(visible), more, strings.Join(parts, " · "))
+	if len(hidden) > 0 {
+		writeRows(b, hidden, common, false)
+	}
 	if len(funcs) > maxTableRows {
 		fmt.Fprintf(b, "\n_… and %d more_\n", len(funcs)-maxTableRows)
 	}
 	b.WriteString("\n")
-	writeMembers(b, funcs[:min(maxTableRows, len(funcs))])
+	writeMembers(b, hidden)
+	b.WriteString("</details>\n\n")
+}
+
+// writeLookFirst names the first lookFirstN red or yellow rows in table
+// order (within a level, reasonUnmeasured rows last), with the rule that
+// rated each, and counts the rest.
+func writeLookFirst(b *strings.Builder, funcs []FuncRow) {
+	var items []string
+	n := 0
+	for _, f := range demoteUnmeasured(funcs) {
+		if f.Level == risk.Green {
+			continue
+		}
+		n++
+		if n > lookFirstN {
+			continue
+		}
+		item := "`" + f.Display + "`"
+		if f.Reason != "" {
+			item += " (" + f.Reason + ")"
+		}
+		items = append(items, item)
+	}
+	if n == 0 {
+		return
+	}
+	b.WriteString("👉 **Look at first:** " + strings.Join(items, " · "))
+	if n > lookFirstN {
+		fmt.Fprintf(b, " +%d", n-lookFirstN)
+	}
+	b.WriteString("\n\n")
 }
 
 // writeUncovered lists, per red or yellow row in table order, the added lines
@@ -1086,7 +1311,7 @@ func writeDiagram(b *strings.Builder, funcs []FuncRow) {
 		}
 	}
 
-	b.WriteString("**How to read the diagram:** coloured boxes are functions this MR changed (🔴 not tested · 🟡 partly tested or a branch removed · 🟢 tested); plain boxes are callers the MR did not change; an arrow points from a caller to the function it calls; a dashed arrow means the function is passed as a callback (registered) and called through it. Every caller is listed under *All callers*.\n\n")
+	b.WriteString("**How to read the diagram:** coloured boxes are functions this MR changed (🔴 not tested · 🟡 partly tested, branch removed or added lines not measured · 🟢 tested); plain boxes are callers the MR did not change; an arrow points from a caller to the function it calls; a dashed arrow means the function is passed as a callback (registered) and called through it. Every caller is listed under *All callers*.\n\n")
 	b.WriteString("```mermaid\nflowchart RL\n")
 	usedClass := map[string]bool{}
 	for _, k := range order {
@@ -1108,7 +1333,7 @@ func writeDiagram(b *strings.Builder, funcs []FuncRow) {
 	b.WriteString("  subgraph legend [\"Legend\"]\n    direction LR\n")
 	for _, l := range []struct{ id, label, class string }{
 		{"lr", "🔴 changed, not tested", "red"},
-		{"ly", "🟡 partly tested / branch removed", "yellow"},
+		{"ly", "🟡 partly tested, branch removed or added lines not measured", "yellow"},
 		{"lg", "🟢 changed, tested", "green"},
 		{"lc", "caller, not changed", ""},
 	} {

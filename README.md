@@ -12,42 +12,45 @@
 
 ## A real note
 
-This is the note mrimpact wrote for its own GitHub support (`mrimpact --base fb160f5 --no-post`, no coverprofile, so test reach is static), unedited:
+This is the note mrimpact v0.4.0 writes for its own GitHub support (`mrimpact --base fb160f5 --no-post` on that change, no coverprofile, so test reach is static and functions with added lines are at most 🟡 until a coverprofile measures them), unedited:
 
 <details>
-<summary>mrimpact on its own change: 15 functions changed, 🔴 0 · 🟡 1 · 🟢 8</summary>
+<summary>mrimpact on its own change: 15 functions changed, 🔴 0 · 🟡 9 · 🟢 0</summary>
 
 <!-- mrimpact:v1 -->
 ### 🔍 MR impact — 15 functions changed
-**🔴 0 · 🟡 1 · 🟢 8** · coverage: `static` · base `fb160f5`\
+**🔴 0 · 🟡 9 · 🟢 0** · coverage: `static` · base `fb160f5`\
 +6 new functions folded into 1 group
 
-🔐 **Sensitive code changed** (3):
+👉 **Look at first:** `main.run` (branch removed) · `main.appendSummary` (added lines not measured) · `main.detectCI` (added lines not measured) +6
 
-- 🟢 `github.(*Client).once` — net/http.(*Client).Do · reached by test
-- 🟢 `main.appendSummary` — os.OpenFile · reached by test
-- 🟡 `main.run` — os.WriteFile · reached by test
+🔐 **Sensitive code changed** (2):
+
+- 🟡 `github.(*Client).once` — net/http.(*Client).Do · reached by test · added lines not measured
+- 🟡 `main.appendSummary` — os.OpenFile · reached by test · added lines not measured
+
+All changes shown are reached from: main
 
 | Risk | Function | Change | Callers | Entry points | Added-line coverage |
 |---|---|---|---|---|---|
-| 🟡 | `main.run` | body (branch removed) · sensitive | 1 | main | reached by test |
-| 🟢 | `main.appendSummary` | new · sensitive | 2 | main | reached by test |
-| 🟢 | `main.detectCI` | new | 2 | main | reached by test |
-| 🟢 | `main.githubPoster.Upsert` | new · +6 | 2 | main | reached by test |
-| 🟢 | `main.gitlabPoster.Upsert` | new | 2 | main | reached by test |
-| 🟢 | `main.resolveVersion` | new | 2 | main | reached by test |
-| 🟢 | `pipeline.Run` | body | 2 | main | reached by test |
-| 🟢 | `report.writeFooter` | body · wiring | 2 (2 pkgs) | main | reached by test |
-| 🟢 | `github.(*statusError).Error` | new · wiring | 0 | — | reached by test |
+| 🟡 | `main.appendSummary` | new · sensitive | 2 | — | reached by test · added lines not measured |
+| 🟡 | `main.detectCI` | new | 2 | — | reached by test · added lines not measured |
+| 🟡 | `main.githubPoster.Upsert` | new · +6 | 2 | — | reached by test · added lines not measured |
+| 🟡 | `main.gitlabPoster.Upsert` | new | 2 | — | reached by test · added lines not measured |
+| 🟡 | `main.resolveVersion` | new | 2 | — | reached by test · added lines not measured |
+| 🟡 | `pipeline.Run` | body | 2 | — | reached by test · added lines not measured |
+| 🟡 | `report.writeFooter` | body · wiring | 2 (2 pkgs) | — | reached by test · added lines not measured |
+| 🟡 | `main.run` | body (branch removed · 1 of 8 moved to `main.detectCI`) | 1 | — | reached by test · added lines not measured |
+| 🟡 | `github.(*statusError).Error` | new · wiring | 0 | — | reached by test · added lines not measured |
 
 <details><summary>main.githubPoster.Upsert +6 new</summary>
 
-- 🟢 `github.(*Client).Upsert` · new · reached by test — `internal/github/github.go`
-- 🟢 `github.(*Client).do` · new · reached by test — `internal/github/github.go`
-- 🟢 `github.(*Client).followable` · new · reached by test — `internal/github/github.go`
-- 🟢 `github.(*Client).once` · new · sensitive · reached by test — `internal/github/github.go`
-- 🟢 `github.nextLink` · new · reached by test — `internal/github/github.go`
-- 🟢 `github.snippet` · new · reached by test — `internal/github/github.go`
+- 🟡 `github.(*Client).Upsert` · new · reached by test · added lines not measured — `internal/github/github.go`
+- 🟡 `github.(*Client).do` · new · reached by test · added lines not measured — `internal/github/github.go`
+- 🟡 `github.(*Client).followable` · new · reached by test · added lines not measured — `internal/github/github.go`
+- 🟡 `github.(*Client).once` · new · sensitive · reached by test · added lines not measured — `internal/github/github.go`
+- 🟡 `github.nextLink` · new · reached by test · added lines not measured — `internal/github/github.go`
+- 🟡 `github.snippet` · new · reached by test · added lines not measured — `internal/github/github.go`
 
 </details>
 
@@ -63,9 +66,9 @@ This is the note mrimpact wrote for its own GitHub support (`mrimpact --base fb1
 
 </details>
 
-🧪 Tests touched in this MR: 20 files
+🧪 Tests touched in this MR: 18 files
 
-<details><summary>Test files (20)</summary>
+<details><summary>Test files (18)</summary>
 
 - `cmd/mrimpact` (2): `ci_test.go`, `main_test.go`
 - `internal/arch` (2): `fromconfig_test.go`, `graph_test.go`
@@ -76,7 +79,6 @@ This is the note mrimpact wrote for its own GitHub support (`mrimpact --base fb1
 - `internal/github` (1): `github_test.go`
 - `internal/pipeline` (3): `e2e_test.go`, `entry_test.go`, `group_test.go`
 - `internal/registrations` (1): `registrations_test.go`
-- `internal/releasetest` (2): `install_test.go`, `release_files_test.go`
 - `internal/report` (1): `report_test.go`
 - `internal/risk` (1): `risk_test.go`
 - `internal/sensitive` (1): `sensitive_test.go`
@@ -84,33 +86,33 @@ This is the note mrimpact wrote for its own GitHub support (`mrimpact --base fb1
 
 </details>
 
-**How to read the diagram:** coloured boxes are functions this MR changed (🔴 not tested · 🟡 partly tested or a branch removed · 🟢 tested); plain boxes are callers the MR did not change; an arrow points from a caller to the function it calls; a dashed arrow means the function is passed as a callback (registered) and called through it. Every caller is listed under *All callers*.
+**How to read the diagram:** coloured boxes are functions this MR changed (🔴 not tested · 🟡 partly tested, branch removed or added lines not measured · 🟢 tested); plain boxes are callers the MR did not change; an arrow points from a caller to the function it calls; a dashed arrow means the function is passed as a callback (registered) and called through it. Every caller is listed under *All callers*.
 
 ```mermaid
 flowchart RL
-  n0["🟡 main.run"]:::yellow
-  n1["main.main"]
-  n2["🟢 main.appendSummary"]:::green
-  n3["🟢 main.detectCI"]:::green
-  n4["🟢 main.githubPoster.Upsert"]:::green
-  n5["🟢 main.gitlabPoster.Upsert"]:::green
-  n6["🟢 main.resolveVersion"]:::green
-  n7["🟢 pipeline.Run"]:::green
-  n8["🟢 report.writeFooter"]:::green
-  n9["report.Render"]
-  n10["🟢 github.(*statusError).Error"]:::green
-  n1 --> n0
+  n0["🟡 main.appendSummary"]:::yellow
+  n1["🟡 main.detectCI"]:::yellow
+  n2["🟡 main.githubPoster.Upsert"]:::yellow
+  n3["🟡 main.gitlabPoster.Upsert"]:::yellow
+  n4["🟡 main.resolveVersion"]:::yellow
+  n5["🟡 pipeline.Run"]:::yellow
+  n6["🟡 report.writeFooter"]:::yellow
+  n7["report.Render"]
+  n8["🟡 main.run"]:::yellow
+  n9["main.main"]
+  n10["🟡 github.(*statusError).Error"]:::yellow
+  n7 --> n6
   n9 --> n8
-  n0 --> n2
-  n0 --> n3
-  n0 --> n4
-  n0 --> n5
-  n0 --> n6
-  n0 --> n7
+  n8 --> n0
+  n8 --> n1
+  n8 --> n2
+  n8 --> n3
+  n8 --> n4
+  n8 --> n5
   subgraph legend ["Legend"]
     direction LR
     lr["🔴 changed, not tested"]:::red
-    ly["🟡 partly tested / branch removed"]:::yellow
+    ly["🟡 partly tested, branch removed or added lines not measured"]:::yellow
     lg["🟢 changed, tested"]:::green
     lc["caller, not changed"]
   end
@@ -120,10 +122,6 @@ flowchart RL
 ```
 
 <details><summary>All callers (15)</summary>
-
-**`main.run`** (1)
-
-- depth 1: `main.main`
 
 **`main.appendSummary`** (2)
 
@@ -160,25 +158,29 @@ flowchart RL
 - depth 1: `report.Render`
 - depth 2: `main.run`
 
+**`main.run`** (1)
+
+- depth 1: `main.main`
+
 </details>
 
 <details><summary>⚠️ Limits of this analysis</summary>
 
 - Calls via `reflect` or dynamic registration (e.g. handlers by name) are not detected.
 - This repo only: callers in other services (HTTP/gRPC) are not visible.
-- Functions called only from dependencies (e.g. HTTP handlers registered with net/http) or from package-level initializers show no callers; where such a function is registered is listed under Registered.
+- Functions called only from dependencies (e.g. HTTP handlers registered with net/http) or from package-level initializers show no callers (methods the standard library calls on interface values, such as `Error`, `Unwrap` or `ServeHTTP`, count as reached from the code that converts their type to an interface; see the list in the reference); where such a function is registered is listed under Registered.
 - Now unused: uses through `reflect`, `//go:linkname` or other repositories are not seen; exported methods, and exported functions of packages other modules can import, are never listed.
 </details>
 
-<sub>Rules: 🔴 untested with callers, or exported signature changed in an importable package · 🟡 partial, untested with no callers, or a branch removed · 🟢 covered (no added lines: reached by a test) · wiring (straight-line setup) at most 🟡 · sensitive and untested 🔴 · mrimpact v0.0.0-20261110082548-59c71b95be3d · 1.0 s</sub>
+<sub>Rules: 🔴 untested with callers, or exported signature changed in an importable package · 🟡 partial, untested with no callers, a branch removed, or added lines not measured · 🟢 covered, or no added lines and reached by a test · wiring (straight-line setup) at most 🟡 · sensitive and untested 🔴 · mrimpact v0.4.0 · 1.8 s</sub>
 
 </details>
 
 ## What a reviewer learns
 
-- **What changed, ranked by risk:** every changed function with its kind (`new`, `body`, `signature`, a removed branch, straight-line wiring), rated 🔴/🟡/🟢 by fixed rules.
+- **What changed, ranked by risk:** every changed function with its kind (`new`, `body`, `signature`, a removed branch, straight-line wiring), rated 🔴/🟡/🟢 by fixed rules; the riskiest rows are named in a `Look at first` line, a branch that moved to another function says where, and a big MR collapses its lesser rows.
 - **Who depends on it:** its callers up to `--depth`, where it is registered as a callback, and the entry points that reach it: routes and handlers, exported API, `main` and `init`.
-- **Whether a test covers it:** the coverage of the added lines from your coverprofile, or, without one, whether any test reaches the function in the call graph, across packages.
+- **Whether a test covers it:** the coverage of the added lines from your coverprofile, or, without one, whether any test reaches the function in the call graph, across packages, including methods the standard library calls (`Unwrap` through `errors.Is`, `ServeHTTP`); without a coverprofile a function with added lines is at most 🟡 (`added lines not measured`). A `go.work` in effect is stated in a `📦` line.
 - **Untested sensitive code:** changed functions that call process, file, SQL, HTTP, crypto, deserialization or mutating reflection APIs (or sit in a package you mark `critical`) and have no test.
 - **What the change left behind:** code now unused, config fields nothing reads any more, registrations removed or rewired, and new import edges that break the architecture's layer rules.
 

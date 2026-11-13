@@ -570,8 +570,8 @@ func TestRender_ConfigLine(t *testing.T) {
 				}
 				return
 			}
-			// One line right after the header block.
-			if !strings.Contains(out, "base `abcdef0`\n\n"+c.want+"\n\n") {
+			// One line right after the header block and the Look-at-first line.
+			if !strings.Contains(out, "base `abcdef0`\n\n👉 **Look at first:** `x.A`\n\n"+c.want+"\n\n") {
 				t.Errorf("want line %q after the header in\n%s", c.want, out)
 			}
 		})
@@ -974,5 +974,265 @@ func TestRender_RegistrationsChangedLongAttrShortened(t *testing.T) {
 	}
 	if want := "+ `" + registrations.Shorten(long) + "`"; !strings.Contains(out, want) || len([]rune(registrations.Shorten(long))) != 90 {
 		t.Errorf("missing %q in\n%s", want, out)
+	}
+}
+
+func lfModel(rows ...FuncRow) Model {
+	return Model{Funcs: rows, Coverage: "static", BaseSHA: "abcdef0", Version: "v0.1.0", Duration: time.Second}
+}
+
+func lfRow(l risk.Level, name, reason string, callers int) FuncRow {
+	return FuncRow{Level: l, Display: name, Kind: "body", Reason: reason, CoverText: "n/a", Callers: callers2(name, callers)}
+}
+
+func callers2(via string, n int) []callgraph.Caller {
+	return callers("c", via, n)
+}
+
+func lookLine(out string) string {
+	for _, l := range strings.Split(out, "\n") {
+		if strings.HasPrefix(l, "👉") {
+			return l
+		}
+	}
+	return ""
+}
+
+func TestLookFirst(t *testing.T) {
+	two := Render(lfModel(lfRow(risk.Red, "a.F", "untested, 2 callers", 2), lfRow(risk.Yellow, "b.G", "partly tested, 40 %", 1)))
+	if got, want := lookLine(two), "👉 **Look at first:** `a.F` (untested, 2 callers) · `b.G` (partly tested, 40 %)"; got != want {
+		t.Errorf("two rows:\n got %q\nwant %q", got, want)
+	}
+	three := Render(lfModel(lfRow(risk.Red, "a.F", "r1", 3), lfRow(risk.Red, "a.G", "r2", 2), lfRow(risk.Yellow, "a.H", "r3", 1)))
+	if got, want := lookLine(three), "👉 **Look at first:** `a.F` (r1) · `a.G` (r2) · `a.H` (r3)"; got != want {
+		t.Errorf("three rows:\n got %q\nwant %q", got, want)
+	}
+	five := Render(lfModel(lfRow(risk.Red, "a.A", "r", 5), lfRow(risk.Red, "a.B", "r", 4), lfRow(risk.Red, "a.C", "r", 3), lfRow(risk.Yellow, "a.D", "r", 2), lfRow(risk.Yellow, "a.E", "r", 1), lfRow(risk.Green, "a.Z", "", 0)))
+	if got, want := lookLine(five), "👉 **Look at first:** `a.A` (r) · `a.B` (r) · `a.C` (r) +2"; got != want {
+		t.Errorf("five rows:\n got %q\nwant %q", got, want)
+	}
+	if l := lookLine(Render(lfModel(lfRow(risk.Green, "a.Z", "", 0)))); l != "" {
+		t.Errorf("all green: line %q", l)
+	}
+
+	m := lfModel(lfRow(risk.Red, "a.F", "untested, 2 callers", 2))
+	m.Folded, m.Groups = 4, 1
+	m.Config = &ConfigNote{File: ".mrimpact.yml"}
+	out := Render(m)
+	fold, look, cfg := strings.Index(out, "folded into"), strings.Index(out, "👉"), strings.Index(out, "⚙️")
+	if fold < 0 || look < 0 || cfg < 0 || !(fold < look && look < cfg) {
+		t.Errorf("order fold=%d look=%d config=%d\n%s", fold, look, cfg, out)
+	}
+	golden(t, "look_first", out)
+}
+
+// compactRows builds r red, y yellow and g green rows with distinct names and
+// descending caller counts inside a level.
+func compactRows(r, y, g int) []FuncRow {
+	var rows []FuncRow
+	add := func(l risk.Level, prefix string, n int) {
+		for i := 0; i < n; i++ {
+			rows = append(rows, FuncRow{Level: l, Display: fmt.Sprintf("%s.F%02d", prefix, i), Kind: "body", CoverText: "n/a",
+				Reason: "r", Callers: callers("c"+prefix, fmt.Sprintf("%s.F%02d", prefix, i), 3)})
+		}
+	}
+	add(risk.Red, "red", r)
+	add(risk.Yellow, "yel", y)
+	add(risk.Green, "grn", g)
+	return rows
+}
+
+func tableRowCount(s string) int {
+	return strings.Count(s, "\n| 🔴 |") + strings.Count(s, "\n| 🟡 |") + strings.Count(s, "\n| 🟢 |")
+}
+
+func TestCompact(t *testing.T) {
+	const anyCompact = "more changed functions ("
+	if out := Render(lfModel(compactRows(3, 10, 7)...)); strings.Contains(out, anyCompact) {
+		t.Errorf("20 rows must not be compact:\n%s", out)
+	}
+
+	out := Render(lfModel(compactRows(3, 12, 6)...))
+	want := "<details><summary>8 more changed functions (🟡 2 · 🟢 6)</summary>"
+	if !strings.Contains(out, want) {
+		t.Fatalf("missing %q in\n%s", want, out)
+	}
+	i := strings.Index(out, want)
+	if n := tableRowCount(out[:i]); n != 13 {
+		t.Errorf("visible rows = %d, want 13", n)
+	}
+	if n := tableRowCount(out[i:]); n != 8 {
+		t.Errorf("collapsed rows = %d, want 8", n)
+	}
+	if !strings.Contains(out, "**🔴 3 · 🟡 12 · 🟢 6**") || !strings.Contains(out, "21 functions changed") {
+		t.Errorf("tally must count all 21:\n%s", out)
+	}
+	// Hidden rows: yel.F10, yel.F11 and all green. Neither appears in the
+	// diagram, the callers list or the uncovered lines.
+	diagram := out[strings.Index(out, "```mermaid"):]
+	diagram = diagram[:strings.Index(diagram[10:], "```")+10]
+	callersAt := out[strings.Index(out, "<summary>All callers"):]
+	for _, hidden := range []string{"yel.F10", "yel.F11", "grn.F00"} {
+		if strings.Contains(diagram, hidden) {
+			t.Errorf("diagram has hidden %s", hidden)
+		}
+		if strings.Contains(callersAt, "**`"+hidden+"`**") {
+			t.Errorf("callers list has hidden %s", hidden)
+		}
+	}
+	if !strings.Contains(callersAt, "**`yel.F09`**") {
+		t.Error("callers list lost a visible row")
+	}
+	golden(t, "compact", out)
+
+	zero := Render(lfModel(compactRows(3, 10, 8)...))
+	if !strings.Contains(zero, "<summary>8 more changed functions (🟢 8)</summary>") {
+		t.Errorf("zero count not omitted:\n%s", zero)
+	}
+
+	// Uncovered added lines: only visible rows.
+	um := lfModel(compactRows(1, 11, 9)...)
+	um.Coverage = "coverprofile"
+	for i := range um.Funcs {
+		um.Funcs[i].Uncovered = []int{3}
+		um.Funcs[i].File = "x.go"
+	}
+	uo := Render(um)
+	if !strings.Contains(uo, "`yel.F09` — ") || strings.Contains(uo, "`yel.F10` — ") {
+		t.Errorf("uncovered block not limited to visible rows:\n%s", uo)
+	}
+}
+
+// TestUnmeasuredRanksLast (I2): within a level, "added lines not measured"
+// rows give way to every other reason in the compact layout's visible 🟡
+// rows and in Look at first; the table keeps its order.
+func TestUnmeasuredRanksLast(t *testing.T) {
+	var rows []FuncRow
+	for i := 0; i < 10; i++ {
+		name := fmt.Sprintf("yel.U%02d", i)
+		rows = append(rows, FuncRow{Level: risk.Yellow, Display: name, Kind: "body", CoverText: "reached by test · added lines not measured",
+			Reason: "added lines not measured", Callers: callers("c", name, 5)})
+	}
+	rows = append(rows, FuncRow{Level: risk.Yellow, Display: "yel.BR", Kind: "body (branch removed)", CoverText: "n/a",
+		Reason: "branch removed", Callers: callers("c", "yel.BR", 1)})
+	for i := 0; i < 10; i++ {
+		name := fmt.Sprintf("grn.F%02d", i)
+		rows = append(rows, FuncRow{Level: risk.Green, Display: name, Kind: "body", CoverText: "n/a", Callers: callers("c", name, 3)})
+	}
+	out := Render(lfModel(rows...))
+	want := "👉 **Look at first:** `yel.BR` (branch removed) · `yel.U00` (added lines not measured) · `yel.U01` (added lines not measured) +8"
+	if got := lookLine(out); got != want {
+		t.Errorf("look first:\n got %q\nwant %q", got, want)
+	}
+	fold := strings.Index(out, "<details><summary>11 more changed functions (🟡 1 · 🟢 10)</summary>")
+	if fold < 0 {
+		t.Fatalf("missing collapsed summary:\n%s", out)
+	}
+	if !strings.Contains(out[:fold], "| 🟡 | `yel.BR` |") {
+		t.Errorf("branch-removed row must be visible:\n%s", out)
+	}
+	if !strings.Contains(out[fold:], "| 🟡 | `yel.U09` |") {
+		t.Errorf("the last unmeasured row must be collapsed:\n%s", out)
+	}
+	// Table order is kept: the visible table lists U00..U08 before BR.
+	if a, b := strings.Index(out, "| 🟡 | `yel.U08` |"), strings.Index(out, "| 🟡 | `yel.BR` |"); a < 0 || a > b {
+		t.Errorf("visible table must keep table order (U08 at %d, BR at %d)", a, b)
+	}
+}
+
+func TestCompactPastRowCap(t *testing.T) {
+	out := Render(lfModel(compactRows(5, 40, 15)...))
+	want := "<details><summary>45 more changed functions (🟡 30 · 🟢 15)</summary>"
+	i := strings.Index(out, want)
+	if i < 0 {
+		t.Fatalf("missing %q in\n%s", want, out)
+	}
+	if n := tableRowCount(out[:i]); n != 15 {
+		t.Errorf("visible rows = %d, want 15", n)
+	}
+	rest := out[i:]
+	rest = rest[:strings.Index(rest, "</details>")]
+	if n := tableRowCount(rest); n != 35 {
+		t.Errorf("collapsed rows = %d, want 35", n)
+	}
+	if !strings.Contains(rest, "_… and 10 more_") {
+		t.Error("missing the overflow line in the collapsed block")
+	}
+	seen := map[string]bool{}
+	for _, l := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(l, "| 🔴 |") && !strings.HasPrefix(l, "| 🟡 |") && !strings.HasPrefix(l, "| 🟢 |") {
+			continue
+		}
+		name := strings.Split(l, "|")[2]
+		if seen[name] {
+			t.Errorf("row %s appears twice", name)
+		}
+		seen[name] = true
+	}
+}
+
+func TestCompactNothingHidden(t *testing.T) {
+	out := Render(lfModel(compactRows(21, 0, 0)...))
+	if strings.Contains(out, "changed functions (") || strings.Contains(out, "<details><summary>0") {
+		t.Errorf("unexpected collapsed block:\n%s", out)
+	}
+	if n := tableRowCount(out); n != 21 {
+		t.Errorf("rows = %d, want 21", n)
+	}
+	if strings.Contains(out, "</summary>\n\n</details>") {
+		t.Error("empty details body")
+	}
+}
+
+func TestCompactNothingVisible(t *testing.T) {
+	out := Render(lfModel(compactRows(0, 0, 21)...))
+	if !strings.Contains(out, "<details><summary>21 changed functions (🟢 21)</summary>") {
+		t.Errorf("summary:\n%s", out)
+	}
+}
+
+func TestWorkspaceLine(t *testing.T) {
+	base := Model{Coverage: "static", BaseSHA: "abcdef0", Version: "v0.1.0", Duration: time.Second,
+		Funcs: []FuncRow{{Level: risk.Yellow, Display: "x.A", Kind: "body", CoverText: "n/a"}}}
+	mod := func(n int) WorkspaceModule {
+		return WorkspaceModule{Path: fmt.Sprintf("example.com/m%d", n), Dir: fmt.Sprintf("../m%d", n), Required: "v1.0.0"}
+	}
+	var seven []WorkspaceModule
+	for i := 1; i <= 7; i++ {
+		seven = append(seven, mod(i))
+	}
+	cases := []struct {
+		name string
+		ws   *WorkspaceNote
+		want string
+	}{
+		{"two", &WorkspaceNote{Path: "go.work", Modules: []WorkspaceModule{
+			{Path: "example.com/lib", Dir: "lib", Replace: "./lib"},
+			{Path: "example.com/patterns", Dir: "../patterns", Required: "v0.1.5"}}},
+			"📦 go.work: `example.com/lib` from `lib` (go.mod replaces → ./lib) · `example.com/patterns` from `../patterns` (go.mod requires v0.1.5) — base built from go.mod"},
+		{"not required", &WorkspaceNote{Path: "go.work", Modules: []WorkspaceModule{{Path: "example.com/lib", Dir: "../lib"}}},
+			"📦 go.work: `example.com/lib` from `../lib` (not required) — base built from go.mod"},
+		{"seven", &WorkspaceNote{Path: "go.work", Modules: seven},
+			"📦 go.work: `example.com/m1` from `../m1` (go.mod requires v1.0.0) · `example.com/m2` from `../m2` (go.mod requires v1.0.0) · `example.com/m3` from `../m3` (go.mod requires v1.0.0) · `example.com/m4` from `../m4` (go.mod requires v1.0.0) · `example.com/m5` from `../m5` (go.mod requires v1.0.0) +2 — base built from go.mod"},
+		{"unreadable", &WorkspaceNote{Path: "go.work", Unreadable: true}, "📦 go.work: go.work (unreadable)"},
+		{"no other modules", &WorkspaceNote{Path: "go.work"}, "📦 go.work: `go.work` (no other modules) — base built from go.mod"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := base
+			m.Workspace = c.ws
+			out := Render(m)
+			if !strings.Contains(out, "👉 **Look at first:** `x.A`\n\n"+c.want+"\n\n") {
+				t.Errorf("want %q right after Look at first in\n%s", c.want, out)
+			}
+			m.Config = &ConfigNote{File: ".mrimpact.yml"}
+			out = Render(m)
+			if !strings.Contains(out, "⚙️ .mrimpact.yml: defaults\n\n"+c.want+"\n\n") {
+				t.Errorf("want %q after the config line in\n%s", c.want, out)
+			}
+		})
+	}
+	if out := Render(base); strings.Contains(out, "📦") {
+		t.Errorf("unexpected 📦 line:\n%s", out)
 	}
 }

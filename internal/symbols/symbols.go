@@ -39,6 +39,12 @@ type ChangedFunc struct {
 	// returns than BASE (Body and Signature only). Removed control flow
 	// changes behaviour even when no line was added.
 	BranchesRemoved bool
+	// RemovedBranches, MovedBranches and MovedTo are set only with
+	// BranchesRemoved: the removed branch keys, how many of them reappear
+	// on added lines of another function, and those functions' Display.
+	RemovedBranches int
+	MovedBranches   int
+	MovedTo         []string
 	// Wiring: straight-line setup code (see isWiring). False for deleted
 	// functions.
 	Wiring bool
@@ -100,6 +106,10 @@ type fn struct {
 	exported   bool
 	paired     bool
 	branches   [4]int // case clauses, ifs, elses, returns
+	keys       []branchKey
+	dir, name  string       // package dir and declared name
+	method     bool         // declared with a receiver
+	refs       map[Ref]bool // what the body names (see funcRefs)
 	wiring     bool
 	cases      []caseEntry
 	switches   map[string]switchInfo // by switchKey
@@ -195,6 +205,27 @@ func Find(changes []diff.FileChange, head, base Source) (Result, error) {
 		}
 	}
 
+	// Branch keys that start on an added line, or lie in a function new in
+	// this MR (git may align its body with the removed lines as context),
+	// by text: a removed branch is "moved" when one of these belongs to
+	// another function (see movedBranches).
+	destIndex := map[string][]*destCopy{}
+	for _, h := range heads {
+		added := changes[h.change].AddedLines
+		for _, k := range h.keys {
+			if pair[h] == nil || anyIn(added, k.line, k.line) {
+				destIndex[k.text] = append(destIndex[k.text], &destCopy{f: h})
+			}
+		}
+	}
+	// Functions that lost branches; moved branches are matched once all are
+	// known, in Display order, so the result does not depend on file order.
+	type lost struct {
+		at   int // index into res.Funcs
+		h, b *fn
+	}
+	var losers []lost
+
 	// Deleted-line hits per BASE function.
 	for _, h := range heads {
 		cf := ChangedFunc{
@@ -224,9 +255,23 @@ func Find(changes []diff.FileChange, head, base Source) (Result, error) {
 					cf.BranchesRemoved = true
 				}
 			}
+			if cf.BranchesRemoved {
+				losers = append(losers, lost{at: len(res.Funcs), h: h, b: b})
+			}
 			res.RemovedCases = append(res.RemovedCases, removedCases(h, b)...)
 		}
 		res.Funcs = append(res.Funcs, cf)
+	}
+	sort.SliceStable(losers, func(i, j int) bool {
+		a, b := losers[i].h, losers[j].h
+		if a.display != b.display {
+			return a.display < b.display
+		}
+		return a.key < b.key
+	})
+	for _, l := range losers {
+		cf := &res.Funcs[l.at]
+		cf.RemovedBranches, cf.MovedBranches, cf.MovedTo = movedBranches(l.h, l.b, destIndex)
 	}
 	for _, b := range bases {
 		if b.paired {
@@ -298,6 +343,8 @@ func load(src Source, p, keyFile string, change int, changedLines []int, refs ma
 			}
 			name := d.Name.Name
 			x.display = DisplayName(pkg, d)
+			x.dir, x.name, x.method = dir, name, d.Recv != nil
+			x.refs = funcRefs(d, dir, imports)
 			switch {
 			case d.Recv == nil && name == "init":
 				inits++
@@ -314,6 +361,7 @@ func load(src Source, p, keyFile string, change int, changedLines []int, refs ma
 			x.sig += "|" + signature(fset, d.Type)
 			x.text = render(fset, d)
 			x.branches = branches(d)
+			x.keys = branchKeys(fset, d)
 			x.wiring = isWiring(d, imports)
 			x.cases, x.switches = switchCases(fset, d, path.Dir(p), imports)
 			fns = append(fns, x)
